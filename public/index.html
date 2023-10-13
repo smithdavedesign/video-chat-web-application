@@ -1,0 +1,167 @@
+<!-- public/index.html (Part 1) -->
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Chat App</title>
+</head>
+
+<body>
+    <h1>Video Chat App</h1>
+
+    <video id="localVideo" autoplay playsinline muted></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+
+    <button onclick="toggleAudio()">Toggle Audio</button>
+    <button onclick="toggleVideo()">Toggle Video</button>
+    <button id="sendDataButton">Send Data</button>
+    <input type="text" id="dataInput" placeholder="Type your message">
+    <ul id="chatMessages"></ul>
+
+    <script src="https://cdn.socket.io/4.1.2/socket.io.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            const socket = io();
+            let localStream;
+            const chatMessages = document.getElementById('chatMessages');
+
+            socket.on('connect', () => {
+                console.log('Connected. Socket ID:', socket.id);
+            });
+
+            socket.on('disconnect', () => {
+                console.log('Disconnected.');
+            });
+
+            const initLocalStream = async () => {
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                    document.getElementById('localVideo').srcObject = localStream;
+                } catch (error) {
+                    console.error('Error accessing media devices:', error);
+                }
+            };
+
+            window.toggleAudio = () => {
+                const enabled = localStream.getAudioTracks()[0].enabled;
+                localStream.getAudioTracks()[0].enabled = !enabled;
+            };
+
+            window.toggleVideo = () => {
+                const enabled = localStream.getVideoTracks()[0].enabled;
+                localStream.getVideoTracks()[0].enabled = !enabled;
+            };
+
+            const peerConnections = {};
+
+            const createPeerConnection = async (socketId) => {
+                await initLocalStream(); // Wait for localStream to initialize
+
+                const peerConnection = new RTCPeerConnection();
+
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+                peerConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        socket.emit('ice-candidate', { candidate: event.candidate, target: socketId });
+                    }
+                };
+
+                const dataChannelOptions = { ordered: true, reliable: true };
+                const dataChannel = peerConnection.createDataChannel('dataChannel', dataChannelOptions);
+
+                dataChannel.onopen = () => {
+                    console.log('Data channel is open');
+                };
+
+                dataChannel.onmessage = (event) => {
+                    console.log('Received message:', event.data);
+                    displayMessage('Peer', event.data);
+                };
+
+                dataChannel.onerror = (error) => {
+                    console.error('Data channel error:', error);
+                };
+
+                document.getElementById('sendDataButton').addEventListener('click', async () => {
+                    const data = document.getElementById('dataInput').value;
+
+                    // Define a function to wait for the data channel to open
+                    const waitForDataChannelOpen = () => {
+                        return new Promise((resolve) => {
+                            if (dataChannel.readyState === 'open') {
+                                resolve();
+                            } else {
+                                // If the data channel is not open, set up an event listener
+                                // to resolve the promise when it opens
+                                dataChannel.onopen = resolve;
+                            }
+                        });
+                    };
+
+                    // Wait for the data channel to open
+                    await waitForDataChannelOpen();
+
+                    // Now that the data channel is open, proceed to send the data
+                    dataChannel.send(data);
+                    document.getElementById('dataInput').value = ''; // Clear input after sending
+                });
+
+                peerConnections[socketId] = peerConnection;
+
+                return peerConnection;
+            };
+
+            socket.on('user-connected', async (socketId) => {
+                console.log('User connected:', socketId);
+                const peerConnection = await createPeerConnection(socketId);
+                const offer = await peerConnection.createOffer()
+                    .then(offer => peerConnection.setLocalDescription(offer))
+                    .then(() => socket.emit('offer', offer, socketId))
+                    .catch(error => console.error('Error creating offer:', error));
+            });
+
+            initLocalStream();
+
+            socket.on('offer', async (offer, socketId) => {
+                console.log('Received offer:', offer);
+                console.log('Socket ID:', socketId);
+
+                const peerConnection = new RTCPeerConnection();
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+                await peerConnection.setRemoteDescription(offer);
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                socket.emit('answer', answer, socketId);
+                peerConnections[socketId] = peerConnection;
+            });
+
+            socket.on('answer', async (answer, socketId) => {
+                await peerConnections[socketId].setRemoteDescription(answer);
+            });
+
+            socket.on('ice-candidate', (candidate, socketId) => {
+                peerConnections[socketId].addIceCandidate(candidate);
+            });
+
+            socket.on('user-disconnected', (socketId) => {
+                if (peerConnections[socketId]) {
+                    peerConnections[socketId].close();
+                    delete peerConnections[socketId];
+                }
+            });
+
+            function displayMessage(sender, message) {
+                const li = document.createElement('li');
+                li.textContent = `${sender}: ${message}`;
+                chatMessages.appendChild(li);
+            }
+        });
+    </script>
+</body>
+
+</html>
