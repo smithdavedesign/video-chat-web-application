@@ -1,1 +1,2 @@
-# video-chat-web-application
+# video-chat-web-application 
+NodeJS, JS, HTML
